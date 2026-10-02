@@ -1,0 +1,30 @@
+# PostgreSQL for store-service (storedb on host port 5435, next to user-service 5432, product-service 5433 and
+# order-service 5434). The service itself runs on the host (mvn spring-boot:run), see README.
+#
+# Config Server (8888), Eureka (8761), Kafka (9092, the shared broker from ../order-service) and user-service (8081,
+# JWKS and internal endpoints) are expected to be running on the host.
+# The schema is created by Flyway (V1__init.sql).
+#
+#   docker compose up -d        # start the database
+#   docker compose down -v      # stop it and drop the data
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: store-service-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-storedb}
+      POSTGRES_USER: ${DB_USERNAME:-storeservice}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-storeservice}
+    ports:
+      - "${DB_PORT:-5435}:5432"
+    volumes:
+      - store-service-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  store-service-pgdata:

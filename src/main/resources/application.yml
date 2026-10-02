@@ -1,0 +1,156 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: store-service
+  config:
+    # "optional:" lets the service start even when the Config Server is down.
+    # Override with CONFIG_SERVER_URL, e.g. inside Docker where localhost is the container.
+    # The service client secret and the account-number encryption key come from the Config Server or the
+    # environment; there are deliberately no local defaults for them.
+    import: optional:configserver:${CONFIG_SERVER_URL:http://localhost:8888}
+  datasource:
+    # Defaults match docker-compose.yml (storedb on host port 5435), next to user-service (5432),
+    # product-service (5433) and order-service (5434).
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5435}/${DB_NAME:storedb}
+    username: ${DB_USERNAME:storeservice}
+    password: ${DB_PASSWORD:storeservice}
+  jpa:
+    # Schema is owned by Flyway (src/main/resources/db/migration); Hibernate only checks it matches the entities.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # The outbox relay sends the stored JSON payload as-is, keyed by the aggregate's UUID
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+    consumer:
+      # Payloads are plain JSON with an "eventType" field; parsed by the listeners themselves
+      group-id: store-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+  cloud:
+    openfeign:
+      client:
+        config:
+          user-service:
+            connect-timeout: 1000
+            # Backstop only: the 3s TimeLimiter below normally fires first
+            read-timeout: 4000
+
+# Local fallbacks mirroring config-repo (application.yml + store-service.yml). The Config Server wins when reachable.
+security:
+  jwt:
+    issuer: ${JWT_ISSUER:user-service}
+    audience: ${JWT_AUDIENCE:marketplace}
+    jwks-uri: ${JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+    clock-skew-seconds: ${JWT_CLOCK_SKEW_SECONDS:30}
+  internal:
+    # Client credentials for user-service's POST /internal/auth/service-token. The secret comes from the Config
+    # Server (SERVICE_CLIENT_SECRET_STORE, same value as in user-service); no default on purpose.
+    client-id: ${spring.application.name}
+    client-secret: ${SERVICE_CLIENT_SECRET_STORE:}
+    # A cached service token is renewed this long before it expires
+    refresh-before-expiry: PT30S
+  state-cache:
+    # Token-version cache of the SecurityStateFilter (fed by user-events, filled from user-service on a miss)
+    max-size: 100000
+    ttl: PT10M
+
+app:
+  timezone: ${APP_TIMEZONE:Asia/Colombo}
+  crypto:
+    # AES-256-GCM key for store bank account numbers: base64 of 32 random bytes (openssl rand -base64 32).
+    # Required; no default on purpose.
+    account-number-key: ${ACCOUNT_NUMBER_ENCRYPTION_KEY:}
+  kafka:
+    topics:
+      user-events: ${KAFKA_TOPIC_USER_EVENTS:user-events}
+      store-events: ${KAFKA_TOPIC_STORE_EVENTS:store-events}
+      order-events: ${KAFKA_TOPIC_ORDER_EVENTS:order-events}
+  scheduling:
+    # Turns all @Scheduled jobs off (tests trigger the jobs directly)
+    enabled: true
+    shedlock:
+      enabled: ${SHEDLOCK_ENABLED:true}
+      default-lock-at-most-for: PT10M
+  outbox:
+    relay-interval: PT1S
+    batch-size: 100
+  settings:
+    # In-memory cache of platform settings; an update on this replica invalidates it at once
+    cache-ttl: PT60S
+  stores:
+    max-bank-accounts: 10
+  ports:
+    # Mock adapters for the external providers (log only, always succeed). Set to another value once a real
+    # adapter exists.
+    notification: mock
+    image-storage: mock
+    image-base-url: https://images.example.invalid/
+
+# Resilience for calls to user-service (see UserServiceGateway). Each call runs as
+# Retry(CircuitBreaker(TimeLimiter(feign call))), like order-service's product-service calls.
+resilience4j:
+  circuitbreaker:
+    instances:
+      userService:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        slow-call-duration-threshold: 2s
+        slow-call-rate-threshold: 100
+        wait-duration-in-open-state: 15s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        # user-service answered, just "no": not a sign it is unhealthy
+        ignore-exceptions:
+          - com.achintha.storeservice.exception.NotFoundException
+  retry:
+    instances:
+      userService:
+        max-attempts: 2
+        wait-duration: 300ms
+        ignore-exceptions:
+          - com.achintha.storeservice.exception.NotFoundException
+          - io.github.resilience4j.circuitbreaker.CallNotPermittedException
+  timelimiter:
+    instances:
+      userService:
+        timeout-duration: 3s
+        cancel-running-future: true
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+  instance:
+    prefer-ip-address: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  # Internal (service-to-service) endpoints are never part of the public API docs
+  paths-to-exclude: /internal/**
