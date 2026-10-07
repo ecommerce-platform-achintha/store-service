@@ -19,6 +19,7 @@ public enum ErrorCode {
     ACCESS_DENIED,
     TOKEN_REVOKED,
     ACCOUNT_BANNED,
+    PASSWORD_CHANGE_REQUIRED,
 
     // Stores
     STORE_NAME_TAKEN,
